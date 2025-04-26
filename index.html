@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DFA Minimizer</title>
+  <link rel="icon" href="Symbol.png">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin:0; padding:0;
+      width:100%; height:100%;
+      font-family:Arial;
+    }
+    body {
+      display: grid;
+      grid-template-columns: 300px 1fr 1fr;
+      grid-template-rows:    50px 1fr 1fr;
+      grid-template-areas:
+        "settings toolbar toolbar"
+        "settings canvas1 canvas2"
+        "settings canvas1 canvas2";
+      height:100vh;
+    }
+    #settings {
+      grid-area: settings;
+      background:#f7f9f9; padding:20px;
+      overflow-y:auto; border-right:1px solid #ccc;
+    }
+    #toolbar {
+      grid-area: toolbar;
+      background:#fff; border-bottom:1px solid #ddd;
+      padding:10px;
+    }
+    #canvas1 {
+      grid-area: canvas1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #partitionContainer {
+      background:#fff;
+      padding:10px;
+      border-bottom:1px solid #ddd;
+      flex: 0 0 auto;
+      overflow-y: auto;
+    }
+    #pairsContainer {
+      background:#ececec;
+      flex: 1 1 auto;
+      overflow: auto;
+      position: relative;
+    }
+    #canvas2 {
+      grid-area: canvas2;
+      background:#ececec;
+      overflow: auto;
+      position: relative;
+    }
+    h2 { margin-top:0; }
+    label { display:block; margin-top:12px; font-weight:bold; }
+    input, textarea {
+      width:100%; padding:6px; margin-top:4px;
+      border:1px solid #ccc; border-radius:4px;
+      font-size:14px;
+    }
+    button {
+      margin-top:10px; padding:6px 12px;
+      border:none; background:#3b82f6; color:white;
+      border-radius:4px; cursor:pointer;
+    }
+    button:hover { background:#2563eb; }
+    #generateTableBtn, #saveDFABtn {
+      width:48%; display:inline-block;
+    }
+    #generateTableBtn { margin-right:4%; }
+    table {
+      width:100%; border-collapse:collapse; margin-top:10px;
+    }
+    th, td {
+      border:1px solid #999; padding:6px; text-align:center;
+    }
+    input.trans-in { width:100%; border:none; text-align:center; }
+    #stepControls { margin-top:20px; }
+  </style>
+</head>
+<body>
+
+  <div id="settings">
+    <h2>1. Input DFA</h2>
+    <label>States (Q):</label>
+    <input id="statesInput" placeholder="q0, q1, q2">
+    <label>Alphabet (Σ):</label>
+    <input id="valuesInput" placeholder="0, 1">
+    <label>Initial State:</label>
+    <input id="startStateInput" placeholder="q0">
+    <label>Final State(s) (F):</label>
+    <input id="finalStatesInput" placeholder="q2, q3">
+    <button id="generateTableBtn">Generate Transition Table</button>
+    <div id="transitionTableDiv"></div>
+    <button id="saveDFABtn" style="display:none;">Save DFA Settings</button>
+    <div id="stepControls" style="display:none;">
+      <h2>2. Minimization Steps</h2>
+      <button id="btnStep">Next Step</button>
+      <button id="btnReset">Reset</button>
+    </div>
+  </div>
+
+  <div id="toolbar"><strong>Toolbar</strong></div>
+
+  <div id="canvas1">
+    <!-- Partition History -->
+    <div id="partitionContainer">
+      <div id="partitionHistoryDiv"></div>
+    </div>
+    <!-- Pair matrix -->
+    <div id="pairsContainer"></div>
+  </div>
+
+  <div id="canvas2"></div>
+
+<script>
+  // ==== chung ====
+  let states=[], values=[], startState='', finalStates=[];
+  let transitionTable={}, pairs=[], marks={}, prevMarks={};
+  let step=0, converged=false, partitionRecords=[];
+  let minStates=[], minTrans={}, minStart='', minFinals=[];
+
+  // Build transition table UI
+  document.getElementById('generateTableBtn').onclick = ()=>{
+    states = document.getElementById('statesInput').value.trim().split(/[,\s]+/);
+    values = document.getElementById('valuesInput').value.trim().split(/[,\s]+/);
+    let html = '<table><tr><th></th>'+values.map(v=>`<th>${v}</th>`).join('')+'</tr>';
+    states.forEach(s=>{
+      html += `<tr><th>${s}</th>` +
+              values.map(v=>`<td><input class="trans-in" id="t-${s}-${v}" placeholder="q?"></td>`).join('') +
+              `</tr>`;
+    });
+    html += '</table>';
+    document.getElementById('transitionTableDiv').innerHTML = html;
+    document.getElementById('saveDFABtn').style.display = 'inline-block';
+  };
+
+  // Save DFA & init
+  document.getElementById('saveDFABtn').onclick = ()=>{
+    startState = document.getElementById('startStateInput').value.trim();
+    finalStates = document.getElementById('finalStatesInput').value.trim().split(/[,\s]+/);
+    transitionTable={};
+    states.forEach(s=>{
+      transitionTable[s]={};
+      values.forEach(v=>{
+        transitionTable[s][v] = document.getElementById(`t-${s}-${v}`).value.trim()||null;
+      });
+    });
+    pairs=[];
+    for(let i=0;i<states.length;i++)
+      for(let j=0;j<i;j++)
+        pairs.push([states[i],states[j]].sort());
+    marks={}; pairs.forEach(p=>marks[p.join()]=-1);
+    prevMarks={}; step=0; converged=false; partitionRecords.length=0;
+    // initial partition
+    const nonF=states.filter(s=>!finalStates.includes(s));
+    partitionRecords.push({level:0, nonF:[nonF], f:[finalStates]});
+    renderPartition();
+    document.getElementById('stepControls').style.display='block';
+    pairsSketch.redraw();
+  };
+
+  // Next step
+  document.getElementById('btnStep').onclick = ()=>{
+    if(converged) return;
+    if(step===0){
+      pairs.forEach(p=>{
+        if(finalStates.includes(p[0])!==finalStates.includes(p[1]))
+          marks[p.join()]=0;
+      });
+    } else {
+      prevMarks={...marks};
+      pairs.forEach(p=>{
+        const k=p.join();
+        if(marks[k]>=0) return;
+        for(let v of values){
+          const r0=transitionTable[p[0]][v], r1=transitionTable[p[1]][v];
+          if(r0&&r1){
+            const k2=[r0,r1].sort().join();
+            if(marks[k2]>=0){ marks[k]=step; break; }
+          }
+        }
+      });
+      recordPartition(step);
+      renderPartition();
+    }
+    step++; pairsSketch.redraw();
+    if(step>1){
+      const same = pairs.every(p=>marks[p.join()]===prevMarks[p.join()]);
+      if(same){
+        converged=true;
+        buildMinDFA();
+        graphSketch.redraw();
+      }
+    }
+  };
+  document.getElementById('btnReset').onclick = ()=>location.reload();
+
+  function recordPartition(lvl){
+    const parent={}; states.forEach(s=>parent[s]=s);
+    pairs.forEach(p=>{
+      if(marks[p.join()]<0){
+        const [a,b]=p, pa=parent[a];
+        states.forEach(s=>{ if(parent[s]===parent[b]) parent[s]=pa; });
+      }
+    });
+    const groups={};
+    states.forEach(s=>{ (groups[parent[s]]||(groups[parent[s]]=[])).push(s); });
+    const nonFgr=[], Fgr=[];
+    Object.values(groups).forEach(g=>{
+      (g.some(s=>finalStates.includes(s))?Fgr:nonFgr).push(g);
+    });
+    partitionRecords.push({level:lvl, nonF:nonFgr, f:Fgr});
+  }
+  function renderPartition(){
+    let html='<h3>Partition History</h3><table><tr><th></th><th>!F</th><th>F</th></tr>';
+    partitionRecords.forEach(rec=>{
+      const nf=rec.nonF.map(g=>`{${g.join(',')}}`).join(' ');
+      const f=rec.f.map(g=>`{${g.join(',')}}`).join(' ');
+      html+=`<tr><td>${rec.level}-equiv</td><td>${nf}</td><td>${f}</td></tr>`;
+    });
+    html+='</table>';
+    document.getElementById('partitionHistoryDiv').innerHTML=html;
+  }
+  function buildMinDFA(){
+    const last=partitionRecords[partitionRecords.length-1];
+    const classes=last.nonF.concat(last.f);
+    minStates=classes.map(g=>g.join(','));
+    minStart=classes.find(g=>g.includes(startState)).join(',');
+    minFinals=classes.filter(g=>g.some(s=>finalStates.includes(s))).map(g=>g.join(','));
+    minTrans={};
+    classes.forEach((g,i)=>{
+      const n=minStates[i];
+      minTrans[n]={};
+      values.forEach(v=>{
+        const t=transitionTable[g[0]][v];
+        const idx=classes.findIndex(h=>h.includes(t));
+        minTrans[n][v]=idx>=0?minStates[idx]:null;
+      });
+    });
+  }
+
+  // ===== p5: pairs matrix (cell-size lớn hơn) =====
+  const pairsSketch = new p5(p=>{
+    const off=40, cell=40; // tăng cell-size lên 40
+    p.setup = ()=>{
+      resizeCanvas();
+      p.noLoop();
+    };
+    p.windowResized = ()=>{
+      resizeCanvas();
+      p.redraw();
+    };
+    function resizeCanvas(){
+      const c=document.getElementById('pairsContainer'),
+            w=c.clientWidth,
+            h=states.length>0 ? off + cell*states.length + off/2 : c.clientHeight;
+      p.createCanvas(w,h).parent('pairsContainer');
+    }
+    p.draw = ()=>{
+      p.clear(); p.background(240);
+      if(!states.length) return;
+      const totalW = off + cell*states.length + off,
+            dx = (p.width - totalW)/2;
+      p.push(); p.translate(dx,0);
+      p.textSize(14); p.fill(0);
+      states.forEach((s,i)=>{
+        p.textAlign(p.CENTER,p.CENTER);
+        p.text(s, off+i*cell+cell/2, off/2);
+        p.text(s, off/2, off+i*cell+cell/2);
+      });
+      for(let i=0;i<states.length;i++){
+        for(let j=0;j<states.length;j++){
+          const x=off+j*cell, y=off+i*cell;
+          p.stroke(0); p.noFill(); p.rect(x,y,cell,cell);
+          if(i<=j){
+            p.noStroke(); p.fill('#ccc');
+            p.text('X', x+cell/2, y+cell/2);
+          } else {
+            const m = marks[[states[i],states[j]].sort().join()];
+            if(m>=0){
+              p.noStroke(); p.fill('#e74c3c');
+              p.text(m, x+cell/2, y+cell/2);
+            }
+          }
+        }
+      }
+      p.pop();
+    };
+  });
+
+  // ===== p5: graph với drag nodes =====
+  const graphSketch = new p5(p=>{
+    let pos={}, dragged=null;
+    p.setup = ()=>{
+      const c=document.getElementById('canvas2');
+      p.createCanvas(c.clientWidth,c.clientHeight).parent('canvas2');
+      p.angleMode(p.RADIANS); p.noLoop();
+    };
+    p.windowResized = ()=>{
+      const c=document.getElementById('canvas2');
+      p.resizeCanvas(c.clientWidth,c.clientHeight);
+      p.redraw();
+    };
+    p.draw = ()=>{
+      p.clear(); p.background(240);
+      if(!minStates.length) return;
+      if(Object.keys(pos).length===0){
+        const cx=p.width/2, cy=p.height/2, r=Math.min(p.width,p.height)/3;
+        minStates.forEach((s,i)=>{
+          const a=p.map(i,0,minStates.length,0,p.TWO_PI);
+          pos[s]={x:cx+r*p.cos(a),y:cy+r*p.sin(a)};
+        });
+      }
+      if(minStart){
+        const q=pos[minStart];
+        drawArrow(p,q.x+60,q.y,q.x,q.y,'');
+      }
+      const edgeMap={};
+      minStates.forEach(s=>{
+        values.forEach(v=>{
+          const t=minTrans[s][v];
+          if(!t) return;
+          const k=s+'->'+t;
+          (edgeMap[k]||(edgeMap[k]={from:s,to:t,labels:[]})).labels.push(v);
+        });
+      });
+      for(let k in edgeMap){
+        const e=edgeMap[k], lab=e.labels.join(',');
+        const p1=pos[e.from], p2=pos[e.to];
+        if(e.from===e.to) drawSelfLoop(p,p1.x,p1.y,lab);
+        else              drawArrow(p,p1.x,p1.y,p2.x,p2.y,lab);
+      }
+      minStates.forEach(s=>{
+        const q=pos[s];
+        p.stroke(0); p.fill(255); p.ellipse(q.x,q.y,40);
+        p.noStroke(); p.fill(0); p.textAlign(p.CENTER,p.CENTER);
+        p.text(s,q.x,q.y);
+      });
+      minFinals.forEach(s=>{
+        const q=pos[s];
+        p.noFill(); p.stroke(0); p.ellipse(q.x,q.y,50);
+      });
+    };
+    p.mousePressed = ()=>{
+      for(let s of minStates){
+        const q=pos[s];
+        if(p.dist(p.mouseX,p.mouseY,q.x,q.y)<20){
+          dragged=s; break;
+        }
+      }
+    };
+    p.mouseDragged = ()=>{
+      if(dragged){
+        pos[dragged].x = p.mouseX;
+        pos[dragged].y = p.mouseY;
+        p.redraw();
+      }
+    };
+    p.mouseReleased = ()=>{ dragged=null; };
+
+    function drawArrow(p,x1,y1,x2,y2,l){
+      const a=p.atan2(y2-y1,x2-x1), R=20;
+      const sx=x1+R*p.cos(a), sy=y1+R*p.sin(a);
+      const ex=x2-R*p.cos(a), ey=y2-R*p.sin(a);
+      p.stroke(0); p.line(sx,sy,ex,ey);
+      p.push(); p.translate(ex,ey); p.rotate(a);
+        p.fill(0); p.triangle(0,0,-8,4,-8,-4);
+      p.pop();
+      if(l){
+        const mx=(sx+ex)/2, my=(sy+ey)/2;
+        let nx=sy-ey, ny=ex-sx, d=Math.hypot(nx,ny)||1;
+        nx/=d; ny/=d;
+        p.noStroke(); p.fill(0);
+        p.textAlign(p.CENTER,p.CENTER);
+        p.text(l, mx+nx*12, my+ny*12);
+      }
+    }
+    function drawSelfLoop(p,x,y,l){
+      p.stroke(0); p.noFill();
+      const rr=20, lr=30;
+      p.arc(x,y-rr-8,lr,lr,0.8*p.PI,2.2*p.PI);
+      if(l){
+        p.noStroke(); p.fill(0);
+        const mid=(0.8*p.PI+2.2*p.PI)/2, rad=lr/2+8;
+        p.textAlign(p.CENTER,p.CENTER);
+        p.text(l, x+rad*p.cos(mid), y-rr-8+rad*p.sin(mid));
+      }
+    }
+  });
+</script>
+</body>
+</html>
